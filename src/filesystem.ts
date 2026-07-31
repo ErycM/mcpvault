@@ -1,4 +1,4 @@
-import { join, resolve, relative, dirname } from 'path';
+import { join, resolve, relative, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { readdir, stat, readFile, writeFile, unlink, mkdir, access, rename, copyFile } from 'node:fs/promises';
 import { constants, realpathSync } from 'node:fs';
@@ -36,8 +36,20 @@ export function classifyWriteError(error: unknown, path: string): Error {
   return new Error(`Failed to write file: ${path} - ${error instanceof Error ? error.message : 'Unknown error'}`);
 }
 
+/**
+ * Basenames that must never be whole-file overwritten via write_note. These files
+ * are appended concurrently by multiple sessions (desktop filesystem + mobile MCP);
+ * a stale client read followed by mode:'overwrite' silently clobbers entries another
+ * session appended after that read (log.md loss incident 2026-06-12). Overwrite is
+ * refused for them - clients must use mode:'append'/'prepend', which re-read the file
+ * server-side under a per-path lock at write time.
+ */
+const APPEND_ONLY_BASENAMES = new Set<string>(['log.md']);
+
 export class FileSystemService {
   private frontmatterHandler: FrontmatterHandler;
+  /** Per-absolute-path serialization chain; closes the read-modify-write TOCTOU window within this process. */
+  private writeChains: Map<string, Promise<void>> = new Map();
   private pathFilter: PathFilter;
 
   constructor(
@@ -133,6 +145,41 @@ export class FileSystemService {
     return fullPath;
   }
 
+  /**
+   * Serialize async mutations to one absolute path. Concurrent calls for the same
+   * path run one at a time in arrival order; different paths stay parallel. Prevents
+   * two read-modify-write writers from interleaving and clobbering each other.
+   */
+  private async withPathLock<T>(fullPath: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.writeChains.get(fullPath) ?? Promise.resolve();
+    let release!: () => void;
+    const mine = new Promise<void>((res) => { release = res; });
+    const chained = prev.then(() => mine);
+    this.writeChains.set(fullPath, chained);
+    await prev.catch(() => {});
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.writeChains.get(fullPath) === chained) {
+        this.writeChains.delete(fullPath);
+      }
+    }
+  }
+
+  /** Write a file atomically: write a temp sibling, then rename over the target (atomic on the same filesystem). */
+  private async atomicWrite(fullPath: string, content: string): Promise<void> {
+    await mkdir(dirname(fullPath), { recursive: true });
+    const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    try {
+      await writeFile(tmpPath, content, 'utf-8');
+      await rename(tmpPath, fullPath);
+    } catch (err) {
+      try { await unlink(tmpPath); } catch { /* best effort */ }
+      throw err;
+    }
+  }
+
   async readNote(path: string): Promise<ParsedNote> {
     path = this.normalizePath(path);
     const fullPath = this.resolvePath(path);
@@ -175,6 +222,12 @@ export class FileSystemService {
       throw new Error(`Access denied: ${path}. This path is restricted (system files like .obsidian, .git, and dotfiles are not accessible).`);
     }
 
+    // Refuse whole-file overwrite of append-only files (e.g. log.md): a stale client
+    // read + overwrite clobbers entries another session appended after that read.
+    if (mode === 'overwrite' && APPEND_ONLY_BASENAMES.has(basename(path))) {
+      throw new Error(`Refused overwrite of append-only file '${basename(path)}'. Whole-file overwrite can clobber concurrent entries from other sessions. Use mode:'append' or mode:'prepend' instead (the server re-reads the file at write time, so a stale client read cannot lose data).`);
+    }
+
     // Validate content is a defined string to prevent writing literal "undefined"
     if (content === undefined || content === null) {
       throw new Error(`Content is required for writing a note: ${path}. The content parameter must be a string.`);
@@ -188,7 +241,8 @@ export class FileSystemService {
       }
     }
 
-    try {
+    return this.withPathLock(fullPath, async () => {
+     try {
       let finalContent: string;
 
       if (mode === 'overwrite') {
@@ -234,12 +288,12 @@ export class FileSystemService {
         }
       }
 
-      // Create directories if they don't exist
-      await mkdir(dirname(fullPath), { recursive: true });
-      await writeFile(fullPath, finalContent!, 'utf-8');
+      // Atomic write (temp + rename) so a torn/partial file is never observed.
+      await this.atomicWrite(fullPath, finalContent!);
     } catch (error) {
       throw classifyWriteError(error, path);
     }
+    });
   }
 
   async patchNote(params: PatchNoteParams): Promise<PatchNoteResult> {
@@ -281,6 +335,7 @@ export class FileSystemService {
     }
 
     try {
+      return await this.withPathLock(this.resolvePath(path), async () => {
       // Read the existing note
       const note = await this.readNote(path);
 
@@ -316,9 +371,9 @@ export class FileSystemService {
         ? fullContent.split(oldString).join(newString)
         : fullContent.replace(oldString, () => newString);
 
-      // Write the updated content
+      // Write the updated content atomically
       const fullPath = this.resolvePath(path);
-      await writeFile(fullPath, updatedContent, 'utf-8');
+      await this.atomicWrite(fullPath, updatedContent);
 
       return {
         success: true,
@@ -326,6 +381,7 @@ export class FileSystemService {
         message: `Successfully replaced ${replaceAll ? occurrences : 1} occurrence${occurrences > 1 ? 's' : ''}`,
         matchCount: occurrences
       };
+      });
 
     } catch (error) {
       return {

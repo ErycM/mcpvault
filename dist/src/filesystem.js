@@ -1,4 +1,4 @@
-import { join, resolve, relative, dirname } from 'path';
+import { join, resolve, relative, dirname, basename } from 'path';
 import { homedir } from 'os';
 import { readdir, stat, readFile, writeFile, unlink, mkdir, access, rename, copyFile } from 'node:fs/promises';
 import { constants, realpathSync } from 'node:fs';
@@ -33,9 +33,20 @@ export function classifyWriteError(error, path) {
     }
     return new Error(`Failed to write file: ${path} - ${error instanceof Error ? error.message : 'Unknown error'}`);
 }
+/**
+ * Basenames that must never be whole-file overwritten via write_note. These files
+ * are appended concurrently by multiple sessions (desktop filesystem + mobile MCP);
+ * a stale client read followed by mode:'overwrite' silently clobbers entries another
+ * session appended after that read (log.md loss incident 2026-06-12). Overwrite is
+ * refused for them - clients must use mode:'append'/'prepend', which re-read the file
+ * server-side under a per-path lock at write time.
+ */
+const APPEND_ONLY_BASENAMES = new Set(['log.md']);
 export class FileSystemService {
     vaultPath;
     frontmatterHandler;
+    /** Per-absolute-path serialization chain; closes the read-modify-write TOCTOU window within this process. */
+    writeChains = new Map();
     pathFilter;
     constructor(vaultPath, pathFilter, frontmatterHandler) {
         this.vaultPath = vaultPath;
@@ -130,6 +141,44 @@ export class FileSystemService {
         }
         return fullPath;
     }
+    /**
+     * Serialize async mutations to one absolute path. Concurrent calls for the same
+     * path run one at a time in arrival order; different paths stay parallel. Prevents
+     * two read-modify-write writers from interleaving and clobbering each other.
+     */
+    async withPathLock(fullPath, fn) {
+        const prev = this.writeChains.get(fullPath) ?? Promise.resolve();
+        let release;
+        const mine = new Promise((res) => { release = res; });
+        const chained = prev.then(() => mine);
+        this.writeChains.set(fullPath, chained);
+        await prev.catch(() => { });
+        try {
+            return await fn();
+        }
+        finally {
+            release();
+            if (this.writeChains.get(fullPath) === chained) {
+                this.writeChains.delete(fullPath);
+            }
+        }
+    }
+    /** Write a file atomically: write a temp sibling, then rename over the target (atomic on the same filesystem). */
+    async atomicWrite(fullPath, content) {
+        await mkdir(dirname(fullPath), { recursive: true });
+        const tmpPath = `${fullPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        try {
+            await writeFile(tmpPath, content, 'utf-8');
+            await rename(tmpPath, fullPath);
+        }
+        catch (err) {
+            try {
+                await unlink(tmpPath);
+            }
+            catch { /* best effort */ }
+            throw err;
+        }
+    }
     async readNote(path) {
         path = this.normalizePath(path);
         const fullPath = this.resolvePath(path);
@@ -167,6 +216,11 @@ export class FileSystemService {
         if (!this.pathFilter.isAllowed(path)) {
             throw new Error(`Access denied: ${path}. This path is restricted (system files like .obsidian, .git, and dotfiles are not accessible).`);
         }
+        // Refuse whole-file overwrite of append-only files (e.g. log.md): a stale client
+        // read + overwrite clobbers entries another session appended after that read.
+        if (mode === 'overwrite' && APPEND_ONLY_BASENAMES.has(basename(path))) {
+            throw new Error(`Refused overwrite of append-only file '${basename(path)}'. Whole-file overwrite can clobber concurrent entries from other sessions. Use mode:'append' or mode:'prepend' instead (the server re-reads the file at write time, so a stale client read cannot lose data).`);
+        }
         // Validate content is a defined string to prevent writing literal "undefined"
         if (content === undefined || content === null) {
             throw new Error(`Content is required for writing a note: ${path}. The content parameter must be a string.`);
@@ -178,50 +232,51 @@ export class FileSystemService {
                 throw new Error(`Invalid frontmatter: ${validation.errors.join(', ')}`);
             }
         }
-        try {
-            let finalContent;
-            if (mode === 'overwrite') {
-                // Original behavior - replace entire content
-                finalContent = frontmatter
-                    ? this.frontmatterHandler.stringify(frontmatter, content)
-                    : content;
-            }
-            else {
-                // For append/prepend, we need to read existing content
-                let existingNote;
-                try {
-                    existingNote = await this.readNote(path);
-                }
-                catch (error) {
-                    // File doesn't exist, treat as overwrite
+        return this.withPathLock(fullPath, async () => {
+            try {
+                let finalContent;
+                if (mode === 'overwrite') {
+                    // Original behavior - replace entire content
                     finalContent = frontmatter
                         ? this.frontmatterHandler.stringify(frontmatter, content)
                         : content;
                 }
-                if (existingNote) {
-                    // Merge frontmatter if provided
-                    const mergedFrontmatter = frontmatter
-                        ? { ...existingNote.frontmatter, ...frontmatter }
-                        : existingNote.frontmatter;
-                    const mergedContent = mode === 'append'
-                        ? existingNote.content + content
-                        : content + existingNote.content;
-                    if (existingNote.matter && existingNote.matter.trim() !== '') {
-                        // Preserve raw formatting for unmodified fields by only applying explicit updates
-                        finalContent = this.frontmatterHandler.preserveStringify(existingNote.matter, frontmatter || {}, mergedContent);
+                else {
+                    // For append/prepend, we need to read existing content
+                    let existingNote;
+                    try {
+                        existingNote = await this.readNote(path);
                     }
-                    else {
-                        finalContent = this.frontmatterHandler.stringify(mergedFrontmatter, mergedContent);
+                    catch (error) {
+                        // File doesn't exist, treat as overwrite
+                        finalContent = frontmatter
+                            ? this.frontmatterHandler.stringify(frontmatter, content)
+                            : content;
+                    }
+                    if (existingNote) {
+                        // Merge frontmatter if provided
+                        const mergedFrontmatter = frontmatter
+                            ? { ...existingNote.frontmatter, ...frontmatter }
+                            : existingNote.frontmatter;
+                        const mergedContent = mode === 'append'
+                            ? existingNote.content + content
+                            : content + existingNote.content;
+                        if (existingNote.matter && existingNote.matter.trim() !== '') {
+                            // Preserve raw formatting for unmodified fields by only applying explicit updates
+                            finalContent = this.frontmatterHandler.preserveStringify(existingNote.matter, frontmatter || {}, mergedContent);
+                        }
+                        else {
+                            finalContent = this.frontmatterHandler.stringify(mergedFrontmatter, mergedContent);
+                        }
                     }
                 }
+                // Atomic write (temp + rename) so a torn/partial file is never observed.
+                await this.atomicWrite(fullPath, finalContent);
             }
-            // Create directories if they don't exist
-            await mkdir(dirname(fullPath), { recursive: true });
-            await writeFile(fullPath, finalContent, 'utf-8');
-        }
-        catch (error) {
-            throw classifyWriteError(error, path);
-        }
+            catch (error) {
+                throw classifyWriteError(error, path);
+            }
+        });
     }
     async patchNote(params) {
         const { oldString, newString, replaceAll = false } = params;
@@ -257,44 +312,46 @@ export class FileSystemService {
             };
         }
         try {
-            // Read the existing note
-            const note = await this.readNote(path);
-            // Get the full content with frontmatter
-            const fullContent = note.originalContent;
-            // Count occurrences of oldString
-            const occurrences = fullContent.split(oldString).length - 1;
-            if (occurrences === 0) {
+            return await this.withPathLock(this.resolvePath(path), async () => {
+                // Read the existing note
+                const note = await this.readNote(path);
+                // Get the full content with frontmatter
+                const fullContent = note.originalContent;
+                // Count occurrences of oldString
+                const occurrences = fullContent.split(oldString).length - 1;
+                if (occurrences === 0) {
+                    return {
+                        success: false,
+                        path,
+                        message: `String not found in note: "${oldString.substring(0, 50)}${oldString.length > 50 ? '...' : ''}"`,
+                        matchCount: 0
+                    };
+                }
+                // If not replaceAll and multiple occurrences exist, fail
+                if (!replaceAll && occurrences > 1) {
+                    return {
+                        success: false,
+                        path,
+                        message: `Found ${occurrences} occurrences of the string. Use replaceAll=true to replace all occurrences, or provide a more specific string to match exactly one occurrence.`,
+                        matchCount: occurrences
+                    };
+                }
+                // Perform the replacement
+                // Use a replacer function so newString is inserted literally,
+                // without $ replacement pattern expansion ($$, $&, $`, $')
+                const updatedContent = replaceAll
+                    ? fullContent.split(oldString).join(newString)
+                    : fullContent.replace(oldString, () => newString);
+                // Write the updated content atomically
+                const fullPath = this.resolvePath(path);
+                await this.atomicWrite(fullPath, updatedContent);
                 return {
-                    success: false,
+                    success: true,
                     path,
-                    message: `String not found in note: "${oldString.substring(0, 50)}${oldString.length > 50 ? '...' : ''}"`,
-                    matchCount: 0
-                };
-            }
-            // If not replaceAll and multiple occurrences exist, fail
-            if (!replaceAll && occurrences > 1) {
-                return {
-                    success: false,
-                    path,
-                    message: `Found ${occurrences} occurrences of the string. Use replaceAll=true to replace all occurrences, or provide a more specific string to match exactly one occurrence.`,
+                    message: `Successfully replaced ${replaceAll ? occurrences : 1} occurrence${occurrences > 1 ? 's' : ''}`,
                     matchCount: occurrences
                 };
-            }
-            // Perform the replacement
-            // Use a replacer function so newString is inserted literally,
-            // without $ replacement pattern expansion ($$, $&, $`, $')
-            const updatedContent = replaceAll
-                ? fullContent.split(oldString).join(newString)
-                : fullContent.replace(oldString, () => newString);
-            // Write the updated content
-            const fullPath = this.resolvePath(path);
-            await writeFile(fullPath, updatedContent, 'utf-8');
-            return {
-                success: true,
-                path,
-                message: `Successfully replaced ${replaceAll ? occurrences : 1} occurrence${occurrences > 1 ? 's' : ''}`,
-                matchCount: occurrences
-            };
+            });
         }
         catch (error) {
             return {

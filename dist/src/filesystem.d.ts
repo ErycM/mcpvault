@@ -14,6 +14,8 @@ export declare function classifyWriteError(error: unknown, path: string): Error;
 export declare class FileSystemService {
     private vaultPath;
     private frontmatterHandler;
+    /** Per-absolute-path serialization chain; closes the read-modify-write TOCTOU window within this process. */
+    private writeChains;
     private pathFilter;
     constructor(vaultPath: string, pathFilter?: PathFilter, frontmatterHandler?: FrontmatterHandler);
     /**
@@ -23,6 +25,14 @@ export declare class FileSystemService {
      */
     private normalizePath;
     private resolvePath;
+    /**
+     * Serialize async mutations to one absolute path. Concurrent calls for the same
+     * path run one at a time in arrival order; different paths stay parallel. Prevents
+     * two read-modify-write writers from interleaving and clobbering each other.
+     */
+    private withPathLock;
+    /** Write a file atomically: write a temp sibling, then rename over the target (atomic on the same filesystem). */
+    private atomicWrite;
     readNote(path: string): Promise<ParsedNote>;
     writeNote(params: NoteWriteParams): Promise<void>;
     patchNote(params: PatchNoteParams): Promise<PatchNoteResult>;
