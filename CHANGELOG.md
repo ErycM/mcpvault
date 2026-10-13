@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `semantic_search`: server-side rerank is now **off by default** (measured 3× latency increase, no recall gain, 2/22 HTTP 500s with rerank on). Set `SUPERMEMORY_RERANK=1` to opt in. One automatic retry (after 500 ms) on HTTP 5xx, timeout, or network error; 4xx errors (including 402 credit exhaustion) surface immediately without retry.
+- `list_all_tags`: now scans only `.md`/`.markdown` files regardless of `--allowed-extensions` (only markdown carries Obsidian tags); skips any directory whose name starts with `.` (e.g. `.archive`, `.agents`, `.claude`); adds an mtime+size per-file cache so unchanged files are not re-read on repeated calls; uses single-flight to prevent concurrent calls from each starting an independent vault scan; bounds file-read concurrency to 3 to keep at least one libuv thread free for other tools. Fixes 300 s timeout on FUSE-mounted vaults with ~3,600 files.
 
 ## [0.12.4] - 2026-07-23
 

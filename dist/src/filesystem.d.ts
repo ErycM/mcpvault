@@ -17,6 +17,8 @@ export declare class FileSystemService {
     /** Per-absolute-path serialization chain; closes the read-modify-write TOCTOU window within this process. */
     private writeChains;
     private pathFilter;
+    private tagCache;
+    private tagScanInFlight;
     constructor(vaultPath: string, pathFilter?: PathFilter, frontmatterHandler?: FrontmatterHandler);
     /**
      * Normalize an incoming path to be vault-relative. Strips leading slashes

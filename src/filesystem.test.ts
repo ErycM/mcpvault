@@ -1566,6 +1566,68 @@ test("listAllTags skips system directories", async () => {
   expect(tags[0]?.tag).toBe("visible");
 });
 
+test("listAllTags ignores non-markdown files (.json, .txt) even with tags inside", async () => {
+  await writeFile(join(testVaultPath, "data.json"), '{"tags": ["json-tag"]}');
+  await writeFile(join(testVaultPath, "notes.txt"), "Some text #txt-tag here");
+  await writeFile(join(testVaultPath, "note.md"), "---\ntags:\n  - real\n---\n");
+
+  const tags = await fileSystem.listAllTags();
+  expect(tags.find(t => t.tag === "json-tag")).toBeUndefined();
+  expect(tags.find(t => t.tag === "txt-tag")).toBeUndefined();
+  expect(tags.find(t => t.tag === "real")?.count).toBe(1);
+});
+
+test("listAllTags skips dot-folders (.archive, .agents) that are not system dirs", async () => {
+  await mkdir(join(testVaultPath, ".archive"), { recursive: true });
+  await writeFile(join(testVaultPath, ".archive/hidden.md"), "---\ntags:\n  - secret\n---\n");
+  await writeFile(join(testVaultPath, "visible.md"), "---\ntags:\n  - public\n---\n");
+
+  const tags = await fileSystem.listAllTags();
+  expect(tags.find(t => t.tag === "secret")).toBeUndefined();
+  expect(tags.find(t => t.tag === "public")?.count).toBe(1);
+});
+
+test("listAllTags second call picks up changed file and drops deleted tags", async () => {
+  await writeFile(join(testVaultPath, "stable.md"), "---\ntags:\n  - stable\n---\n");
+  await writeFile(join(testVaultPath, "volatile.md"), "---\ntags:\n  - old\n---\n");
+
+  const first = await fileSystem.listAllTags();
+  expect(first.find(t => t.tag === "old")?.count).toBe(1);
+  expect(first.find(t => t.tag === "stable")?.count).toBe(1);
+
+  // Overwrite volatile.md — changes mtime and size
+  await writeFile(join(testVaultPath, "volatile.md"), "---\ntags:\n  - new\n---\n");
+
+  const second = await fileSystem.listAllTags();
+  expect(second.find(t => t.tag === "new")?.count).toBe(1);
+  expect(second.find(t => t.tag === "old")).toBeUndefined();
+  // Stable file still present
+  expect(second.find(t => t.tag === "stable")?.count).toBe(1);
+});
+
+test("listAllTags deleted file's tags disappear on next call", async () => {
+  await writeFile(join(testVaultPath, "note.md"), "---\ntags:\n  - ghost\n---\n");
+  await fileSystem.listAllTags(); // populate cache
+
+  await rm(join(testVaultPath, "note.md"));
+
+  const tags = await fileSystem.listAllTags();
+  expect(tags.find(t => t.tag === "ghost")).toBeUndefined();
+});
+
+test("listAllTags concurrent calls share a single scan (single-flight)", async () => {
+  await writeFile(join(testVaultPath, "note.md"), "---\ntags:\n  - foo\n---\n");
+
+  const [r1, r2] = await Promise.all([
+    fileSystem.listAllTags(),
+    fileSystem.listAllTags(),
+  ]);
+
+  // Same promise resolves to same array reference
+  expect(r1).toBe(r2);
+  expect(r1.find(t => t.tag === "foo")?.count).toBe(1);
+});
+
 describe("classifyWriteError (#109)", () => {
   const mk = (code?: string, message = "boom") => {
     const e = new Error(message) as NodeJS.ErrnoException;

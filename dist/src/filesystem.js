@@ -48,6 +48,8 @@ export class FileSystemService {
     /** Per-absolute-path serialization chain; closes the read-modify-write TOCTOU window within this process. */
     writeChains = new Map();
     pathFilter;
+    tagCache = new Map();
+    tagScanInFlight = null;
     constructor(vaultPath, pathFilter, frontmatterHandler) {
         this.vaultPath = vaultPath;
         const resolved = resolve(vaultPath);
@@ -1054,48 +1056,125 @@ export class FileSystemService {
         };
     }
     async listAllTags() {
-        const tagCounts = new Map();
-        const inlineTagRegex = /(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/\-]*)/g;
-        const scanDirectory = async (dirPath, relativePath = '') => {
-            const entries = await readdir(dirPath, { withFileTypes: true });
-            for (const entry of entries) {
-                const entryRelativePath = relativePath ? `${relativePath}/${entry.name}` : entry.name;
-                const fullEntryPath = join(dirPath, entry.name);
-                if (entry.isDirectory()) {
-                    if (!this.pathFilter.isAllowedForListing(entryRelativePath))
-                        continue;
-                    await scanDirectory(fullEntryPath, entryRelativePath);
+        if (this.tagScanInFlight)
+            return this.tagScanInFlight;
+        const scan = async () => {
+            // Step 1: Collect all .md/.markdown candidates; skip dot-folders
+            const candidates = [];
+            const collectFiles = async (dirPath, relativePath = '') => {
+                let entries;
+                try {
+                    entries = await readdir(dirPath, { withFileTypes: true });
                 }
-                else if (entry.isFile() && this.pathFilter.isAllowed(entryRelativePath)) {
+                catch {
+                    return;
+                }
+                for (const entry of entries) {
+                    const rel = relativePath ? `${relativePath}/${entry.name}` : entry.name;
+                    if (entry.isDirectory()) {
+                        if (entry.name.startsWith('.'))
+                            continue;
+                        if (!this.pathFilter.isAllowedForListing(rel))
+                            continue;
+                        await collectFiles(join(dirPath, entry.name), rel);
+                    }
+                    else if (entry.isFile()) {
+                        const n = entry.name.toLowerCase();
+                        if (!n.endsWith('.md') && !n.endsWith('.markdown'))
+                            continue;
+                        if (!this.pathFilter.isAllowed(rel))
+                            continue;
+                        candidates.push(rel);
+                    }
+                }
+            };
+            await collectFiles(this.vaultPath);
+            // Step 2: Stat all candidates (concurrency 10) to find which changed
+            const toRead = [];
+            const stillPresent = new Set();
+            let statIdx = 0;
+            const statWorker = async () => {
+                while (statIdx < candidates.length) {
+                    const i = statIdx++;
+                    const relPath = candidates[i];
+                    const fullPath = join(this.vaultPath, relPath);
                     try {
-                        const content = await readFile(fullEntryPath, 'utf-8');
-                        const parsed = this.frontmatterHandler.parse(content);
-                        // Frontmatter tags
-                        const fmTags = parsed.frontmatter?.tags;
-                        if (Array.isArray(fmTags)) {
-                            for (const tag of fmTags) {
-                                if (typeof tag === 'string' && tag.trim()) {
-                                    const normalized = tag.trim().toLowerCase();
-                                    tagCounts.set(normalized, (tagCounts.get(normalized) || 0) + 1);
-                                }
-                            }
-                        }
-                        // Inline #tags from body content
-                        let match;
-                        while ((match = inlineTagRegex.exec(parsed.content)) !== null) {
-                            const normalized = match[1].toLowerCase();
-                            tagCounts.set(normalized, (tagCounts.get(normalized) || 0) + 1);
+                        const s = await stat(fullPath);
+                        stillPresent.add(relPath);
+                        const mtimeMs = s.mtimeMs;
+                        const size = s.size;
+                        const cached = this.tagCache.get(relPath);
+                        if (!cached || cached.mtimeMs !== mtimeMs || cached.size !== size) {
+                            toRead.push({ relPath, fullPath, mtimeMs, size });
                         }
                     }
                     catch {
-                        // Skip files that can't be read
+                        // File disappeared; excluded from stillPresent
                     }
                 }
+            };
+            const statWorkerCount = Math.min(10, candidates.length);
+            if (statWorkerCount > 0) {
+                await Promise.all(Array.from({ length: statWorkerCount }, () => statWorker()));
             }
+            // Step 3: Drop cache entries for files that disappeared
+            for (const key of this.tagCache.keys()) {
+                if (!stillPresent.has(key))
+                    this.tagCache.delete(key);
+            }
+            // Step 4: Read changed/new files, concurrency = 3, keeping ≥1 libuv thread free
+            let readIdx = 0;
+            const readWorker = async () => {
+                while (readIdx < toRead.length) {
+                    const i = readIdx++;
+                    const item = toRead[i];
+                    try {
+                        const content = await readFile(item.fullPath, 'utf-8');
+                        const parsed = this.frontmatterHandler.parse(content);
+                        const fmTags = [];
+                        const rawFmTags = parsed.frontmatter?.tags;
+                        if (Array.isArray(rawFmTags)) {
+                            for (const tag of rawFmTags) {
+                                if (typeof tag === 'string' && tag.trim()) {
+                                    fmTags.push(tag.trim().toLowerCase());
+                                }
+                            }
+                        }
+                        const inlineTags = [];
+                        const itr = /(?:^|\s)#([a-zA-Z][a-zA-Z0-9_/\-]*)/g;
+                        let m;
+                        while ((m = itr.exec(parsed.content)) !== null) {
+                            inlineTags.push(m[1].toLowerCase());
+                        }
+                        this.tagCache.set(item.relPath, { mtimeMs: item.mtimeMs, size: item.size, fmTags, inlineTags });
+                    }
+                    catch {
+                        // Skip unreadable files
+                    }
+                }
+            };
+            const readWorkerCount = Math.min(3, toRead.length);
+            if (readWorkerCount > 0) {
+                await Promise.all(Array.from({ length: readWorkerCount }, () => readWorker()));
+            }
+            // Step 5: Build tag counts from cache for all present files
+            const tagCounts = new Map();
+            for (const relPath of stillPresent) {
+                const entry = this.tagCache.get(relPath);
+                if (!entry)
+                    continue;
+                for (const tag of entry.fmTags) {
+                    tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+                }
+                for (const tag of entry.inlineTags) {
+                    tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+                }
+            }
+            return Array.from(tagCounts.entries())
+                .map(([tag, count]) => ({ tag, count }))
+                .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
         };
-        await scanDirectory(this.vaultPath);
-        return Array.from(tagCounts.entries())
-            .map(([tag, count]) => ({ tag, count }))
-            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+        this.tagScanInFlight = scan().finally(() => { this.tagScanInFlight = null; });
+        return this.tagScanInFlight;
     }
 }
