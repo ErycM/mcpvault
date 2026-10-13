@@ -8,6 +8,7 @@ import { FrontmatterHandler, parseFrontmatter } from "./frontmatter.js";
 import { PathFilter } from "./pathfilter.js";
 import { SearchService } from "./search.js";
 import { handleWikiLinkTool } from "./wikilink/index.js";
+import { semanticSearch } from "./semantic.js";
 import { resolve } from "path";
 
 export interface CreateServerOptions {
@@ -114,6 +115,18 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
               pathPrefix: { type: "string", description: "Restrict the search to a vault subtree, e.g. \"Projects/2026\" (directory prefix)" },
               excludePaths: { type: "array", items: { type: "string" }, description: "Skip files under these subtrees, e.g. [\"Archive\", \"meta\"] (directory prefixes)" },
               prettyPrint: { type: "boolean", description: "Format JSON response with indentation (default: false)", default: false }
+            },
+            required: ["query"]
+          }
+        },
+        {
+          name: "semantic_search",
+          description: "Semantic search over the vault's wiki/ pages (Supermemory index, synced nightly from the notebook). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values and client-meeting detail are not in the vault, so they are not in this index either.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query (natural language, Portuguese or English)" },
+              limit: { type: "number", description: "Maximum number of results (default: 10, max: 20)", default: 10, maximum: 20 }
             },
             required: ["query"]
           }
@@ -430,6 +443,21 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
 
         case "wiki_link":
           return await handleWikiLinkTool(fileSystem, trimmedArgs);
+
+        case "semantic_search": {
+          try {
+            const result = await semanticSearch(trimmedArgs.query, trimmedArgs.limit ?? 10);
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }]
+            };
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            return {
+              content: [{ type: "text", text: msg }],
+              isError: true
+            };
+          }
+        }
 
         default:
           throw new Error(`Unknown tool: ${toolName}`);

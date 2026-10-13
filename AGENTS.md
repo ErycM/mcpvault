@@ -58,7 +58,7 @@ website/               # Astro 5 website (separate package, see website/AGENTS.m
 
 **SearchService** (`src/search.ts`) — Content and frontmatter search with multi-word matching and BM25 relevance reranking. Returns token-optimized results with minified field names: `{p, t, ex, mc, ln, uri}`. Max 20 results.
 
-### 16 MCP Tools
+### 17 MCP Tools
 
 | Tool | Description |
 |------|-------------|
@@ -78,6 +78,7 @@ website/               # Astro 5 website (separate package, see website/AGENTS.m
 | get_vault_stats | Vault statistics: total notes, folders, size, recent files |
 | list_all_tags | List all tags across the vault with occurrence counts |
 | wiki_link | Resolve Obsidian [[wiki links]] (incl. path-qualified [[folder/Note]]) and return the note |
+| semantic_search | Semantic (meaning-based, PT↔EN) search over wiki/ pages via Supermemory SuperRAG; read-only; date-fallback retry |
 
 ### Design Patterns
 

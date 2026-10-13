@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- New `semantic_search` tool: semantic (meaning-based, Portuguese↔English) search over vault's wiki/ pages via Supermemory SuperRAG index (synced nightly). Read-only. Returns paths and scores; open pages with `read_note`. Includes automatic date-fallback retry: queries containing ISO or short dates that return zero results are retried with dates stripped.
+
 ## [0.12.4] - 2026-07-23
 
 ### Fixed
