@@ -225,3 +225,85 @@ test("wiki_link resolves path-qualified link to the exact file", async () => {
     await server.close();
   }
 });
+
+// ============================================================================
+// SEARCH CACHE INVALIDATION
+// ============================================================================
+
+test("write_note then search_notes finds the new content immediately (TTL=60s)", async () => {
+  const { server, client } = await connectClient();
+  try {
+    // Prime the walk cache with an initial search (no results yet)
+    const empty = await client.callTool({ name: "search_notes", arguments: { query: "uniquetoken" } });
+    expect(JSON.parse((empty.content as any)[0].text)).toHaveLength(0);
+
+    // Write a note that contains the token
+    await client.callTool({
+      name: "write_note",
+      arguments: { path: "capture.md", content: "# Capture\n\nuniqetoken uniquetoken here." },
+    });
+
+    // Search immediately — must find it despite 60 s TTL
+    const found = await client.callTool({ name: "search_notes", arguments: { query: "uniquetoken", limit: 5 } });
+    const results = JSON.parse((found.content as any)[0].text);
+    expect(results.map((r: any) => r.p)).toContain("capture.md");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("delete_note then search_notes no longer returns the file", async () => {
+  const { server, client } = await connectClient();
+  try {
+    await client.callTool({
+      name: "write_note",
+      arguments: { path: "gone.md", content: "# Gone\n\ndeletetoken here." },
+    });
+
+    // Confirm it's findable
+    const before = await client.callTool({ name: "search_notes", arguments: { query: "deletetoken", limit: 5 } });
+    expect(JSON.parse((before.content as any)[0].text).map((r: any) => r.p)).toContain("gone.md");
+
+    // Delete it
+    await client.callTool({
+      name: "delete_note",
+      arguments: { path: "gone.md", confirmPath: "gone.md" },
+    });
+
+    // Must not appear in search anymore
+    const after = await client.callTool({ name: "search_notes", arguments: { query: "deletetoken", limit: 5 } });
+    expect(JSON.parse((after.content as any)[0].text).map((r: any) => r.p)).not.toContain("gone.md");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});
+
+test("move_note then search_notes returns the new path", async () => {
+  const { server, client } = await connectClient();
+  try {
+    await client.callTool({
+      name: "write_note",
+      arguments: { path: "before.md", content: "# Before\n\nmovetoken here." },
+    });
+
+    // Prime cache
+    await client.callTool({ name: "search_notes", arguments: { query: "movetoken", limit: 5 } });
+
+    // Move it
+    await client.callTool({
+      name: "move_note",
+      arguments: { oldPath: "before.md", newPath: "after.md" },
+    });
+
+    // Old path gone, new path visible
+    const results = await client.callTool({ name: "search_notes", arguments: { query: "movetoken", limit: 5 } });
+    const paths = JSON.parse((results.content as any)[0].text).map((r: any) => r.p);
+    expect(paths).not.toContain("before.md");
+    expect(paths).toContain("after.md");
+  } finally {
+    await client.close();
+    await server.close();
+  }
+});

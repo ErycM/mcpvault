@@ -267,6 +267,7 @@ export function createServer(vaultPath, options = {}) {
                         ...(fm !== undefined && { frontmatter: fm }),
                         mode: trimmedArgs.mode || 'overwrite'
                     });
+                    searchService.invalidate(trimmedArgs.path);
                     return {
                         content: [{ type: "text", text: `Successfully wrote note: ${trimmedArgs.path} (mode: ${trimmedArgs.mode || 'overwrite'})` }]
                     };
@@ -278,6 +279,8 @@ export function createServer(vaultPath, options = {}) {
                         newString: trimmedArgs.newString,
                         replaceAll: trimmedArgs.replaceAll
                     });
+                    if (result.success)
+                        searchService.invalidate(trimmedArgs.path);
                     return {
                         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                         isError: !result.success
@@ -296,6 +299,8 @@ export function createServer(vaultPath, options = {}) {
                         confirmPath: trimmedArgs.confirmPath,
                         trashMode: trimmedArgs.trashMode
                     });
+                    if (result.success)
+                        searchService.invalidate(trimmedArgs.path);
                     return {
                         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                         isError: !result.success
@@ -322,6 +327,10 @@ export function createServer(vaultPath, options = {}) {
                         newPath: trimmedArgs.newPath,
                         overwrite: trimmedArgs.overwrite
                     });
+                    if (result.success) {
+                        searchService.invalidate(trimmedArgs.oldPath);
+                        searchService.invalidate(trimmedArgs.newPath);
+                    }
                     return {
                         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                         isError: !result.success
@@ -335,6 +344,10 @@ export function createServer(vaultPath, options = {}) {
                         confirmNewPath: trimmedArgs.confirmNewPath,
                         overwrite: trimmedArgs.overwrite
                     });
+                    if (result.success) {
+                        searchService.invalidate(trimmedArgs.oldPath);
+                        searchService.invalidate(trimmedArgs.newPath);
+                    }
                     return {
                         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                         isError: !result.success
@@ -361,6 +374,7 @@ export function createServer(vaultPath, options = {}) {
                         frontmatter: fm,
                         merge: trimmedArgs.merge
                     });
+                    searchService.invalidate(trimmedArgs.path);
                     return {
                         content: [{ type: "text", text: `Successfully updated frontmatter for: ${trimmedArgs.path}` }]
                     };
@@ -385,6 +399,9 @@ export function createServer(vaultPath, options = {}) {
                         operation: trimmedArgs.operation,
                         tags: trimmedArgs.tags
                     });
+                    if (result.success && trimmedArgs.operation !== 'list') {
+                        searchService.invalidate(trimmedArgs.path);
+                    }
                     return {
                         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
                         isError: !result.success

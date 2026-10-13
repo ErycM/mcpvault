@@ -401,6 +401,43 @@ describe("SearchService", () => {
       expect(r2.map(r => r.p)).toContain("stay.md");
     });
 
+    test("invalidate(path) evicts that entry — next search re-reads the file", async () => {
+      await writeNote("live.md", "# Live\n\noriginal word.");
+      await searchService.search({ query: "original", limit: 10 });
+
+      // Overwrite on disk without updating mtime trick: just write directly and invalidate
+      const { writeFile: wf } = await import("fs/promises");
+      await wf(join(testVaultPath, "live.md"), "# Live\n\nreplaced term.");
+      searchService.invalidate("live.md");
+
+      const results = await searchService.search({ query: "replaced", limit: 10 });
+      expect(results).toHaveLength(1);
+      expect(results[0]!.p).toBe("live.md");
+    });
+
+    test("invalidate() with no arg clears all content cache entries", async () => {
+      await writeNote("x.md", "# X\n\nkeyword here.");
+      await searchService.search({ query: "keyword", limit: 10 });
+
+      // Override spy before invalidate to confirm next search re-reads
+      const spy = vi.spyOn(searchService as any, "_readFile");
+      searchService.invalidate();
+      await searchService.search({ query: "keyword", limit: 10 });
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+      spy.mockRestore();
+    });
+
+    test("invalidate(path) clears the walk cache so a new file appears immediately", async () => {
+      // First search with empty vault — primes walk cache
+      await searchService.search({ query: "newfile", limit: 10 }).catch(() => {});
+      // Write a new file and invalidate (simulating what createServer does after write_note)
+      await writeNote("newfile.md", "# New\n\nnewfile content.");
+      searchService.invalidate("newfile.md");
+
+      const results = await searchService.search({ query: "newfile", limit: 10 });
+      expect(results.map(r => r.p)).toContain("newfile.md");
+    });
+
     test("cap exceeded: files are not cached but results are still correct", async () => {
       // cacheCapBytes: 0 means no file ever fits in the cache
       const svc = new SearchService(testVaultPath, new PathFilter(), { cacheCapBytes: 0 });

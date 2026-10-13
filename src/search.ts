@@ -47,6 +47,20 @@ export class SearchService {
     this.cacheCapBytes = cacheCapBytes;
   }
 
+  /**
+   * Drop stale cache entries after a write. Always clears the walk cache so
+   * new/deleted files appear on the next search. With a path, evicts only that
+   * content entry; without, wipes the entire content cache.
+   */
+  invalidate(relativePath?: string): void {
+    this.walkCache = null;
+    if (relativePath === undefined) {
+      this.contentCache.clear();
+    } else {
+      this.contentCache.delete(relativePath);
+    }
+  }
+
   async search(params: SearchParams): Promise<SearchResult[]> {
     const {
       query,
