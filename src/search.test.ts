@@ -1,7 +1,7 @@
-import { describe, test, expect, beforeEach, afterEach } from "vitest";
+import { describe, test, expect, beforeEach, afterEach, vi } from "vitest";
 import { SearchService } from "./search.js";
 import { PathFilter } from "./pathfilter.js";
-import { writeFile, mkdir, mkdtemp, rm } from "fs/promises";
+import { writeFile, mkdir, mkdtemp, rm, unlink } from "fs/promises";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -321,6 +321,101 @@ describe("SearchService", () => {
       await writeNote("Project-notes/x.md", "eta banana");
       const results = await searchService.search({ query: "banana", limit: 20, pathPrefix: "Projects" });
       expect(results.map(r => r.p)).not.toContain("Project-notes/x.md");
+    });
+  });
+
+  // ============================================================================
+  // CONTENT CACHE
+  // ============================================================================
+
+  describe("content cache", () => {
+    test("second search within TTL performs zero readFile calls", async () => {
+      // Default TTL is 60 s — both searches run well within that window
+      await writeNote("a.md", "# A\n\ncachehit keyword.");
+      await writeNote("b.md", "# B\n\ncachehit keyword.");
+
+      // First search populates the cache
+      const r1 = await searchService.search({ query: "cachehit", limit: 10 });
+      expect(r1.length).toBe(2);
+
+      // Spy after the first search so we only count reads from the second
+      const spy = vi.spyOn(searchService as any, "_readFile");
+
+      const r2 = await searchService.search({ query: "cachehit", limit: 10 });
+      expect(r2.length).toBe(2);
+      expect(spy).not.toHaveBeenCalled();
+
+      spy.mockRestore();
+    });
+
+    test("after TTL expiry with unchanged file, stat only — no readFile", async () => {
+      // cacheTtlMs: 0 means TTL always expired, so we stat every file each search.
+      // If mtime+size are unchanged the cached content is reused without a readFile.
+      const svc = new SearchService(testVaultPath, new PathFilter(), { cacheTtlMs: 0 });
+      await writeNote("unchanged.md", "# Unchanged\n\nstatonly keyword.");
+
+      // First search: must readFile (nothing cached yet)
+      const spy1 = vi.spyOn(svc as any, "_readFile");
+      await svc.search({ query: "statonly", limit: 10 });
+      expect(spy1.mock.calls.length).toBeGreaterThan(0);
+      spy1.mockRestore();
+
+      // Second search: file unchanged → stat hits, no readFile
+      const spy2 = vi.spyOn(svc as any, "_readFile");
+      const results = await svc.search({ query: "statonly", limit: 10 });
+      expect(results).toHaveLength(1);
+      expect(spy2).not.toHaveBeenCalled();
+      spy2.mockRestore();
+    });
+
+    test("modified file is re-read and new content is found", async () => {
+      const svc = new SearchService(testVaultPath, new PathFilter(), { cacheTtlMs: 0 });
+      await writeNote("mutable.md", "# Mutable\n\noriginal content here.");
+
+      await svc.search({ query: "original", limit: 10 });
+
+      // Overwrite with new content (updates mtime)
+      await writeFile(join(testVaultPath, "mutable.md"), "# Mutable\n\nupdated newterm here.");
+
+      const results = await svc.search({ query: "newterm", limit: 10 });
+      expect(results).toHaveLength(1);
+      expect(results[0]!.p).toBe("mutable.md");
+
+      // Old term must not appear
+      const old = await svc.search({ query: "original", limit: 10 });
+      expect(old).toHaveLength(0);
+    });
+
+    test("deleted file disappears from results", async () => {
+      const svc = new SearchService(testVaultPath, new PathFilter(), { cacheTtlMs: 0 });
+      await writeNote("gone.md", "# Gone\n\ndeleteme keyword.");
+      await writeNote("stay.md", "# Stay\n\ndeleteme keyword.");
+
+      const r1 = await svc.search({ query: "deleteme", limit: 10 });
+      expect(r1.map(r => r.p)).toContain("gone.md");
+
+      await unlink(join(testVaultPath, "gone.md"));
+
+      const r2 = await svc.search({ query: "deleteme", limit: 10 });
+      expect(r2.map(r => r.p)).not.toContain("gone.md");
+      expect(r2.map(r => r.p)).toContain("stay.md");
+    });
+
+    test("cap exceeded: files are not cached but results are still correct", async () => {
+      // cacheCapBytes: 0 means no file ever fits in the cache
+      const svc = new SearchService(testVaultPath, new PathFilter(), { cacheCapBytes: 0 });
+      await writeNote("cap1.md", "# Cap1\n\ncaplimit keyword.");
+      await writeNote("cap2.md", "# Cap2\n\ncaplimit keyword.");
+
+      const r1 = await svc.search({ query: "caplimit", limit: 10 });
+      expect(r1).toHaveLength(2);
+
+      // Second search must re-read every file (nothing cached)
+      const spy = vi.spyOn(svc as any, "_readFile");
+      const r2 = await svc.search({ query: "caplimit", limit: 10 });
+      expect(r2).toHaveLength(2);
+      expect(spy.mock.calls.length).toBe(2);
+      spy.mockRestore();
     });
   });
 });

@@ -1,5 +1,5 @@
 import { join, resolve } from 'path';
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
 import { generateObsidianUri } from './uri.js';
 /** Normalize a subtree path: forward slashes, no leading/trailing slashes. */
 function normalizeSubtree(p) {
@@ -14,9 +14,15 @@ function isUnderSubtree(relativePath, subtree) {
 export class SearchService {
     pathFilter;
     vaultPath;
-    constructor(vaultPath, pathFilter) {
+    cacheTtlMs;
+    cacheCapBytes;
+    contentCache = new Map();
+    walkCache = null;
+    constructor(vaultPath, pathFilter, { cacheTtlMs = 60_000, cacheCapBytes = 64 * 1024 * 1024 } = {}) {
         this.pathFilter = pathFilter;
         this.vaultPath = resolve(vaultPath);
+        this.cacheTtlMs = cacheTtlMs;
+        this.cacheCapBytes = cacheCapBytes;
     }
     async search(params) {
         const { query, limit = 5, searchContent = true, searchFrontmatter = false, caseSensitive = false, pathPrefix, excludePaths } = params;
@@ -34,49 +40,52 @@ export class SearchService {
         const searchQuery = caseSensitive ? query : query.toLowerCase();
         const terms = searchQuery.split(/\s+/).filter(t => t.length > 0);
         const scoringTerms = terms.length > 1 ? [...terms, searchQuery] : terms;
-        // Recursively find all .md files
+        // Directory walk (cached for cacheTtlMs)
         const markdownFiles = await this.findMarkdownFiles(this.vaultPath);
-        // Pre-filter by pathFilter before I/O
+        // Prune content cache entries for files no longer on disk
         const prefixLen = this.vaultPath.length + 1;
+        const walkSet = new Set();
+        for (const fp of markdownFiles) {
+            walkSet.add(fp.substring(prefixLen).replace(/\\/g, '/'));
+        }
+        for (const key of this.contentCache.keys()) {
+            if (!walkSet.has(key))
+                this.contentCache.delete(key);
+        }
+        // Pre-filter by pathFilter before I/O
         const allowedFiles = [];
         for (const fullPath of markdownFiles) {
             const relativePath = fullPath.substring(prefixLen).replace(/\\/g, '/');
             if (!this.pathFilter.isAllowed(relativePath))
                 continue;
-            // Scope to the requested subtree, and skip excluded subtrees, before I/O
             if (normalizedPrefix && !isUnderSubtree(relativePath, normalizedPrefix))
                 continue;
             if (normalizedExcludes.some(ex => isUnderSubtree(relativePath, ex)))
                 continue;
             allowedFiles.push({ fullPath, relativePath });
         }
-        // Read files in parallel batches
-        const BATCH_SIZE = 5;
-        for (let start = 0; start < allowedFiles.length; start += BATCH_SIZE) {
-            const batch = allowedFiles.slice(start, start + BATCH_SIZE);
-            const contents = await Promise.all(batch.map(f => readFile(f.fullPath, 'utf-8').catch(() => null)));
-            for (let i = 0; i < batch.length; i++) {
-                const content = contents[i];
-                if (content === null || content === undefined)
+        // Process files with bounded concurrency (3 I/O ops at once keeps ≥1 libuv thread free)
+        let fileIdx = 0;
+        const worker = async () => {
+            while (fileIdx < allowedFiles.length) {
+                const i = fileIdx++;
+                const { fullPath, relativePath } = allowedFiles[i];
+                const content = await this.getFileContent(fullPath, relativePath);
+                if (content === null)
                     continue;
-                const { relativePath } = batch[i];
                 let searchableText = '';
-                // Prepare search text based on options
                 if (searchContent && searchFrontmatter) {
                     searchableText = content;
                 }
                 else if (searchContent) {
-                    // Remove frontmatter from search
-                    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n/);
-                    searchableText = frontmatterMatch ? content.slice(frontmatterMatch[0].length) : content;
+                    const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+                    searchableText = fm ? content.slice(fm[0].length) : content;
                 }
                 else if (searchFrontmatter) {
-                    // Search only frontmatter
-                    const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---\n/);
-                    searchableText = frontmatterMatch ? frontmatterMatch[1] || '' : '';
+                    const fm = content.match(/^---\n([\s\S]*?)\n---\n/);
+                    searchableText = fm ? fm[1] || '' : '';
                 }
                 const searchIn = caseSensitive ? searchableText : searchableText.toLowerCase();
-                // Collect corpus stats for reranking
                 const docLength = searchIn.split(/\s+/).filter(w => w.length > 0).length;
                 totalDocLength += docLength;
                 docCount++;
@@ -85,12 +94,9 @@ export class SearchService {
                         termDocFreq.set(term, (termDocFreq.get(term) || 0) + 1);
                     }
                 }
-                // Extract title from filename
                 const title = relativePath.split('/').pop()?.replace(/\.md$/, '') || relativePath;
-                // Check filename match (any term)
                 const filenameToSearch = caseSensitive ? title : title.toLowerCase();
                 const filenameMatch = terms.some(term => filenameToSearch.includes(term));
-                // Check content match (any term)
                 const termIndices = terms.map(term => searchIn.indexOf(term));
                 const anyTermFound = termIndices.some(idx => idx !== -1);
                 const firstIndex = anyTermFound
@@ -102,42 +108,35 @@ export class SearchService {
                     let lineNumber = 0;
                     const termFreqs = new Map();
                     if (firstIndex !== -1) {
-                        // Find the term that matched first for excerpt
                         const firstTermIdx = termIndices.indexOf(firstIndex);
                         const firstTerm = terms[firstTermIdx];
-                        // Extract excerpt around first content match
                         const excerptStart = Math.max(0, firstIndex - 21);
                         const excerptEnd = Math.min(searchableText.length, firstIndex + firstTerm.length + 21);
                         excerpt = searchableText.slice(excerptStart, excerptEnd).trim();
-                        // Add ellipsis if excerpt is truncated
                         if (excerptStart > 0)
                             excerpt = '...' + excerpt;
                         if (excerptEnd < searchableText.length)
                             excerpt = excerpt + '...';
-                        // Count total content matches across all terms
                         for (const term of scoringTerms) {
                             let count = 0;
-                            let searchIndex = 0;
-                            while ((searchIndex = searchIn.indexOf(term, searchIndex)) !== -1) {
+                            let idx = 0;
+                            while ((idx = searchIn.indexOf(term, idx)) !== -1) {
                                 count++;
-                                searchIndex += term.length;
+                                idx += term.length;
                             }
                             termFreqs.set(term, count);
                             matchCount += count;
                         }
-                        // Find line number of first match
                         const lines = searchableText.slice(0, firstIndex).split('\n');
                         lineNumber = lines.length;
                     }
                     else {
-                        // Filename-only match: use beginning of content as excerpt
                         excerpt = searchableText.slice(0, 50).trim();
                         if (searchableText.length > 50)
                             excerpt = excerpt + '...';
                         matchCount = 0;
                         lineNumber = 0;
                     }
-                    // Add filename match to count
                     if (filenameMatch)
                         matchCount++;
                     candidates.push({
@@ -154,19 +153,73 @@ export class SearchService {
                     });
                 }
             }
+        };
+        const workerCount = Math.min(3, allowedFiles.length);
+        if (workerCount > 0) {
+            await Promise.all(Array.from({ length: workerCount }, () => worker()));
         }
-        const results = this.rerank(candidates, scoringTerms, termDocFreq, docCount, totalDocLength, maxLimit);
-        return results;
+        return this.rerank(candidates, scoringTerms, termDocFreq, docCount, totalDocLength, maxLimit);
+    }
+    async getFileContent(fullPath, relativePath) {
+        const now = Date.now();
+        const cached = this.contentCache.get(relativePath);
+        // Within TTL: return cached content with no I/O at all
+        if (cached && now - cached.checkedAt < this.cacheTtlMs) {
+            return cached.content;
+        }
+        // Stat to check freshness
+        let fileStat;
+        try {
+            fileStat = await stat(fullPath);
+        }
+        catch {
+            return null;
+        }
+        const { mtimeMs, size } = fileStat;
+        // Unchanged: refresh checkedAt only, no read
+        if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+            this.contentCache.set(relativePath, { ...cached, checkedAt: now });
+            return cached.content;
+        }
+        // File is new or changed: read it
+        let content;
+        try {
+            content = await this._readFile(fullPath);
+        }
+        catch {
+            return null;
+        }
+        // Cache if within cap (sum of string lengths)
+        let currentSize = 0;
+        for (const entry of this.contentCache.values()) {
+            currentSize += entry.content.length;
+        }
+        if (currentSize + content.length <= this.cacheCapBytes) {
+            this.contentCache.set(relativePath, { mtimeMs, size, content, checkedAt: now });
+        }
+        return content;
+    }
+    // Thin wrapper so tests can spy on actual disk reads without intercepting ESM named imports
+    async _readFile(path) {
+        return readFile(path, 'utf-8');
     }
     async findMarkdownFiles(dirPath) {
+        const now = Date.now();
+        if (this.walkCache && now - this.walkCache.cachedAt < this.cacheTtlMs) {
+            return this.walkCache.files;
+        }
+        const files = await this._walkMarkdownFiles(dirPath);
+        this.walkCache = { files, cachedAt: now };
+        return files;
+    }
+    async _walkMarkdownFiles(dirPath) {
         const markdownFiles = [];
         try {
             const entries = await readdir(dirPath, { withFileTypes: true });
             for (const entry of entries) {
                 const fullPath = join(dirPath, entry.name);
                 if (entry.isDirectory()) {
-                    // Recursively search subdirectories
-                    const subFiles = await this.findMarkdownFiles(fullPath);
+                    const subFiles = await this._walkMarkdownFiles(fullPath);
                     markdownFiles.push(...subFiles);
                 }
                 else if (entry.isFile() && entry.name.endsWith('.md')) {
@@ -174,8 +227,8 @@ export class SearchService {
                 }
             }
         }
-        catch (error) {
-            // Skip directories that can't be read
+        catch {
+            // Skip unreadable directories
         }
         return markdownFiles;
     }
