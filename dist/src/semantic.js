@@ -1,6 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+// Results are chunks, not pages. One large page fills many slots. Since 2026-10-13,
+// the vault uploads pages over 60k chars as one document per section, which crowded
+// the top 50. The API maximum is 100 (200 returns HTTP 400).
+const RAW_SEARCH_LIMIT = 100;
 async function resolveKey(opts) {
     if (opts?.apiKey)
         return opts.apiKey;
@@ -50,7 +54,7 @@ async function post(query, container, apiKey, fetchImpl, retryDelayMs, timeoutMs
                 body: JSON.stringify({
                     q: query,
                     containerTag: container,
-                    limit: 50,
+                    limit: RAW_SEARCH_LIMIT,
                     threshold: 0,
                     searchMode: 'documents',
                     ...(useRerank && { rerank: true }),

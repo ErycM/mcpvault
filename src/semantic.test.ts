@@ -193,6 +193,23 @@ test('body includes rerank: true when SUPERMEMORY_RERANK=1', async () => {
   expect(capturedBody?.['rerank']).toBe(true);
 });
 
+test('body has raw search limit of 100', async () => {
+  let capturedBody: Record<string, unknown> | undefined;
+
+  const fetchImpl = async (_url: string, init?: RequestInit): Promise<FakeResponse> => {
+    capturedBody = JSON.parse(init?.body as string) as Record<string, unknown>;
+    return { ok: true, status: 200, json: async () => ({ results: [], total: 0 }) };
+  };
+
+  await semanticSearch('test query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    retryDelayMs: 0,
+  });
+
+  expect(capturedBody?.['limit']).toBe(100);
+});
+
 test('500 then 200 -> success with exactly 2 fetch calls', async () => {
   let callCount = 0;
 
