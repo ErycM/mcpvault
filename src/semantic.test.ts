@@ -283,3 +283,62 @@ test('two 500s -> throws after exactly 2 fetch calls', async () => {
   expect(callCount).toBe(2);
   expect(caughtError?.message).toMatch(/^semantic search unavailable:/);
 });
+
+test('both attempts hang until aborted -> rejects with timeout after exactly 2 attempts', async () => {
+  let callCount = 0;
+
+  const fetchImpl = (_url: string, init?: RequestInit): Promise<FakeResponse> => {
+    callCount++;
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      });
+    });
+  };
+
+  let caughtError: Error | undefined;
+  try {
+    await semanticSearch('test query', 5, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      apiKey: 'test-key',
+      retryDelayMs: 0,
+      timeoutMs: 50,
+    });
+  } catch (err) {
+    caughtError = err as Error;
+  }
+
+  expect(callCount).toBe(2);
+  expect(caughtError?.message).toBe('semantic search unavailable: timeout');
+});
+
+test('first attempt hangs until aborted then fast 200 -> success', async () => {
+  let callCount = 0;
+
+  const fetchImpl = (_url: string, init?: RequestInit): Promise<FakeResponse> => {
+    callCount++;
+    if (callCount === 1) {
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+        });
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: async () => ({ results: [makeHit('wiki/a.md')], total: 1 }),
+    });
+  };
+
+  const result = await semanticSearch('test query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    retryDelayMs: 0,
+    timeoutMs: 50,
+  });
+
+  expect(callCount).toBe(2);
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]?.path).toBe('wiki/a.md');
+});

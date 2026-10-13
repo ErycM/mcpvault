@@ -19,6 +19,7 @@ export interface SemanticSearchOptions {
   apiKey?: string;
   container?: string;
   retryDelayMs?: number;
+  timeoutMs?: number;
 }
 
 interface SupermemoryHit {
@@ -81,6 +82,7 @@ async function post(
   apiKey: string,
   fetchImpl: typeof fetch,
   retryDelayMs: number,
+  timeoutMs: number,
 ): Promise<SupermemoryHit[]> {
   const useRerank = process.env['SUPERMEMORY_RERANK'] === '1';
 
@@ -90,7 +92,7 @@ async function post(
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => { controller.abort(); }, 20_000);
+    const timer = setTimeout(() => { controller.abort(); }, timeoutMs);
 
     let response: Response;
     try {
@@ -147,16 +149,17 @@ export async function semanticSearch(
   const clampedLimit = Math.max(1, Math.min(20, limit));
   const fetchImpl = opts?.fetchImpl ?? fetch;
   const retryDelayMs = opts?.retryDelayMs ?? 500;
+  const timeoutMs = opts?.timeoutMs ?? 8_000;
 
   const t0 = Date.now();
 
-  let hits = await post(query, container, apiKey, fetchImpl, retryDelayMs);
+  let hits = await post(query, container, apiKey, fetchImpl, retryDelayMs, timeoutMs);
   let fallback = false;
 
   if (hits.length === 0 && hasDate(query)) {
     const clean = stripDates(query);
     if (clean.length > 0) {
-      hits = await post(clean, container, apiKey, fetchImpl, retryDelayMs);
+      hits = await post(clean, container, apiKey, fetchImpl, retryDelayMs, timeoutMs);
       fallback = true;
     }
   }

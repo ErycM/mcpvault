@@ -13,6 +13,7 @@ export interface SemanticSearchOptions {
     apiKey?: string;
     container?: string;
     retryDelayMs?: number;
+    timeoutMs?: number;
 }
 export declare function semanticSearch(query: string, limit?: number, opts?: SemanticSearchOptions): Promise<SemanticSearchResponse>;
 //# sourceMappingURL=semantic.d.ts.map
