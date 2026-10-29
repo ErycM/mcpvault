@@ -102,7 +102,7 @@ export function createServer(vaultPath, options = {}) {
                 },
                 {
                     name: "semantic_search",
-                    description: "Semantic search over the vault's wiki/ pages (local index on the home server, Supermemory as fallback; the response's `source` says which answered). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values are not in the vault, and client-meeting detail lives only in the private vault: use semantic_search_private for it when that tool exists.",
+                    description: "Semantic search over the vault's wiki/ pages (Supermemory by default; local index as fallback when available — the response's `source` says which answered). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values are not in the vault, and client-meeting detail lives only in the private vault: use semantic_search_private for it when that tool exists.",
                     inputSchema: {
                         type: "object",
                         properties: {

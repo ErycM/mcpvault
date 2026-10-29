@@ -9,6 +9,7 @@ export interface SemanticSearchResponse {
     latencyMs: number;
     source: 'local' | 'supermemory';
     localError?: string;
+    supermemoryError?: string;
 }
 export interface SemanticSearchOptions {
     fetchImpl?: typeof fetch;
@@ -17,6 +18,7 @@ export interface SemanticSearchOptions {
     retryDelayMs?: number;
     timeoutMs?: number;
     zbragUrl?: string;
+    zbragWiki?: 'primary' | 'fallback' | 'off';
 }
 export interface PrivateSearchResult {
     path: string;

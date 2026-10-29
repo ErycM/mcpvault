@@ -391,6 +391,7 @@ test('local success: returns source=local, fallback=false, no localError', async
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'primary',
   });
 
   expect(result.source).toBe('local');
@@ -412,6 +413,7 @@ test('local failure -> Supermemory fallback with localError', async () => {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     zbragUrl: 'http://127.0.0.1:9123',
     apiKey: 'test-key',
+    zbragWiki: 'primary',
   });
 
   expect(result.source).toBe('supermemory');
@@ -441,10 +443,138 @@ test('local success with no Supermemory key: succeeds without key lookup', async
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'primary',
   });
 
   expect(result.source).toBe('local');
   expect(result.results).toHaveLength(1);
+});
+
+// ============================================================================
+// ZBRAG_WIKI mode tests
+// ============================================================================
+
+test('zbragWiki=primary: zbrag succeeds -> source=local, no supermemoryError', async () => {
+  const fetchImpl = makeZbragFetch([makeZbragHit('wiki/p.md', 0.9)]);
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'primary',
+  });
+
+  expect(result.source).toBe('local');
+  expect(result.supermemoryError).toBeUndefined();
+  expect(result.results[0]?.path).toBe('wiki/p.md');
+});
+
+test('zbragWiki=fallback: SM succeeds -> source=supermemory, no supermemoryError', async () => {
+  const fetchImpl = makeFetch([makeHit('wiki/sm.md', 0.8)]);
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'fallback',
+  });
+
+  expect(result.source).toBe('supermemory');
+  expect(result.supermemoryError).toBeUndefined();
+  expect(result.results[0]?.path).toBe('wiki/sm.md');
+});
+
+test('zbragWiki=fallback: SM error -> zbrag fallback with supermemoryError', async () => {
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    if (url.includes('supermemory.ai')) {
+      return { ok: false, status: 503, json: async () => ({}) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ results: [makeZbragHit('wiki/local.md', 0.7)], timing: {}, source: 'local', index: 'idx' }),
+    };
+  };
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'fallback',
+    retryDelayMs: 0,
+  });
+
+  expect(result.source).toBe('local');
+  expect(typeof result.supermemoryError).toBe('string');
+  expect(result.supermemoryError).toMatch(/HTTP 503/);
+  expect(result.results[0]?.path).toBe('wiki/local.md');
+});
+
+test('zbragWiki=fallback: both fail -> rethrows SM error', async () => {
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    if (url.includes('supermemory.ai')) {
+      return { ok: false, status: 502, json: async () => ({}) };
+    }
+    return { ok: false, status: 503, json: async () => ({}) };
+  };
+
+  let caughtError: Error | undefined;
+  try {
+    await semanticSearch('query', 5, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      apiKey: 'test-key',
+      zbragUrl: 'http://127.0.0.1:9123',
+      zbragWiki: 'fallback',
+      retryDelayMs: 0,
+    });
+  } catch (err) {
+    caughtError = err as Error;
+  }
+
+  expect(caughtError).toBeDefined();
+  expect(caughtError?.message).toMatch(/HTTP 502/);
+});
+
+test('zbragWiki=fallback: SM returns zero results -> no zbrag fallback', async () => {
+  let zbragCalled = false;
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    if (url.includes('127.0.0.1')) {
+      zbragCalled = true;
+    }
+    return { ok: true, status: 200, json: async () => ({ results: [], total: 0 }) };
+  };
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'fallback',
+  });
+
+  expect(zbragCalled).toBe(false);
+  expect(result.source).toBe('supermemory');
+  expect(result.results).toHaveLength(0);
+  expect(result.supermemoryError).toBeUndefined();
+});
+
+test('zbragWiki=off: never calls zbrag even when zbragUrl set', async () => {
+  let zbragCalled = false;
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    if (url.includes('127.0.0.1')) {
+      zbragCalled = true;
+    }
+    return { ok: true, status: 200, json: async () => ({ results: [makeHit('wiki/off.md')], total: 1 }) };
+  };
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+    zbragUrl: 'http://127.0.0.1:9123',
+    zbragWiki: 'off',
+  });
+
+  expect(zbragCalled).toBe(false);
+  expect(result.source).toBe('supermemory');
+  expect(result.results[0]?.path).toBe('wiki/off.md');
 });
 
 // ============================================================================

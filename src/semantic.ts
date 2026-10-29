@@ -19,6 +19,7 @@ export interface SemanticSearchResponse {
   latencyMs: number;
   source: 'local' | 'supermemory';
   localError?: string;
+  supermemoryError?: string;
 }
 
 export interface SemanticSearchOptions {
@@ -28,6 +29,7 @@ export interface SemanticSearchOptions {
   retryDelayMs?: number;
   timeoutMs?: number;
   zbragUrl?: string;
+  zbragWiki?: 'primary' | 'fallback' | 'off';
 }
 
 export interface PrivateSearchResult {
@@ -228,9 +230,19 @@ export async function semanticSearch(
   const zbragUrl = opts?.zbragUrl ?? process.env['ZBRAG_URL'];
   const timeoutMs = opts?.timeoutMs ?? Number(process.env['ZBRAG_TIMEOUT_MS'] ?? 4_000);
 
+  const zbragWikiEnv = (process.env['ZBRAG_WIKI'] ?? 'fallback') as 'primary' | 'fallback' | 'off';
+  const mode = opts?.zbragWiki ?? zbragWikiEnv;
+
   const t0 = Date.now();
 
-  if (zbragUrl) {
+  // Without ZBRAG_URL, or when mode=off, always use Supermemory only.
+  if (!zbragUrl || mode === 'off') {
+    const smResult = await supermemorySearch(query, clampedLimit, opts, fetchImpl);
+    return { ...smResult, source: 'supermemory' };
+  }
+
+  if (mode === 'primary') {
+    // zbrag first, Supermemory on error
     try {
       const data = await queryZbrag(zbragUrl, query, clampedLimit, fetchImpl, timeoutMs);
       const seen = new Set<string>();
@@ -244,14 +256,35 @@ export async function semanticSearch(
       return { results, fallback: false, latencyMs: Date.now() - t0, source: 'local' };
     } catch (err) {
       const localError = err instanceof Error ? err.message : String(err);
-      // Fall through to Supermemory
       const smResult = await supermemorySearch(query, clampedLimit, opts, fetchImpl);
       return { ...smResult, source: 'supermemory', localError };
     }
   }
 
-  const smResult = await supermemorySearch(query, clampedLimit, opts, fetchImpl);
-  return { ...smResult, source: 'supermemory' };
+  // mode === 'fallback': Supermemory first; on error, try zbrag.
+  // Zero results from Supermemory is not an error — no zbrag fallback.
+  let smError: Error;
+  try {
+    const smResult = await supermemorySearch(query, clampedLimit, opts, fetchImpl);
+    return { ...smResult, source: 'supermemory' };
+  } catch (err) {
+    smError = err instanceof Error ? err : new Error(String(err));
+  }
+
+  try {
+    const data = await queryZbrag(zbragUrl, query, clampedLimit, fetchImpl, timeoutMs);
+    const seen = new Set<string>();
+    const results: SemanticSearchResult[] = [];
+    for (const hit of data.results) {
+      if (!hit.path || seen.has(hit.path)) continue;
+      seen.add(hit.path);
+      results.push({ path: hit.path, slug: hit.slug, score: hit.score });
+      if (results.length >= clampedLimit) break;
+    }
+    return { results, fallback: false, latencyMs: Date.now() - t0, source: 'local', supermemoryError: smError.message };
+  } catch {
+    throw smError;
+  }
 }
 
 async function supermemorySearch(
