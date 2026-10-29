@@ -8,7 +8,7 @@ import { FrontmatterHandler, parseFrontmatter } from "./frontmatter.js";
 import { PathFilter } from "./pathfilter.js";
 import { SearchService } from "./search.js";
 import { handleWikiLinkTool } from "./wikilink/index.js";
-import { semanticSearch } from "./semantic.js";
+import { semanticSearch, semanticSearchPrivate } from "./semantic.js";
 import { resolve } from "path";
 
 export interface CreateServerOptions {
@@ -121,7 +121,7 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
         },
         {
           name: "semantic_search",
-          description: "Semantic search over the vault's wiki/ pages (Supermemory index, synced nightly from the notebook). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values and client-meeting detail are not in the vault, so they are not in this index either.",
+          description: "Semantic search over the vault's wiki/ pages (local index on the home server, Supermemory as fallback; the response's `source` says which answered). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values are not in the vault, and client-meeting detail lives only in the private vault: use semantic_search_private for it when that tool exists.",
           inputSchema: {
             type: "object",
             properties: {
@@ -131,6 +131,18 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
             required: ["query"]
           }
         },
+        ...(process.env['ZBRAG_URL'] ? [{
+          name: "semantic_search_private",
+          description: "Meaning-based search over the private vault's client-meeting bodies. Those bodies are not in the vault: wiki/work/ pages are stubs. Returns the stub path, a score and a redacted snippet of the private body. Use it when a question needs detail of a client meeting that the stub does not have. Snippets are confidential: quote them in the chat, never copy them into a vault page (write_note, patch_note, update_frontmatter) or any other tool. Sensitive values are redacted at the source, and every call is logged.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query (natural language, Portuguese or English)" },
+              limit: { type: "number", description: "Maximum number of results (default: 5, max: 10)", default: 5, maximum: 10 }
+            },
+            required: ["query"]
+          }
+        }] : []),
         {
           name: "move_note",
           description: "Move or rename a note in the vault",
@@ -462,6 +474,21 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
         case "semantic_search": {
           try {
             const result = await semanticSearch(trimmedArgs.query, trimmedArgs.limit ?? 10);
+            return {
+              content: [{ type: "text", text: JSON.stringify(result) }]
+            };
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            return {
+              content: [{ type: "text", text: msg }],
+              isError: true
+            };
+          }
+        }
+
+        case "semantic_search_private": {
+          try {
+            const result = await semanticSearchPrivate(trimmedArgs.query, trimmedArgs.limit ?? 5);
             return {
               content: [{ type: "text", text: JSON.stringify(result) }]
             };

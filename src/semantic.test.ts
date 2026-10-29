@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from 'vitest';
-import { semanticSearch } from './semantic.js';
+import { semanticSearch, semanticSearchPrivate } from './semantic.js';
 
 function makeHit(path: string, score = 0.8) {
   return {
@@ -21,13 +21,16 @@ function makeFetch(hits: unknown[], status = 200) {
 let savedApiKey: string | undefined;
 let savedKeyFile: string | undefined;
 let savedRerank: string | undefined;
+let savedZbragUrl: string | undefined;
 
 beforeEach(() => {
   savedApiKey = process.env['SUPERMEMORY_API_KEY'];
   savedKeyFile = process.env['SUPERMEMORY_KEY_FILE'];
   savedRerank = process.env['SUPERMEMORY_RERANK'];
+  savedZbragUrl = process.env['ZBRAG_URL'];
   delete process.env['SUPERMEMORY_API_KEY'];
   delete process.env['SUPERMEMORY_RERANK'];
+  delete process.env['ZBRAG_URL'];
   process.env['SUPERMEMORY_KEY_FILE'] = '/tmp/nonexistent-sm-key-for-tests';
 });
 
@@ -46,6 +49,11 @@ afterEach(() => {
     process.env['SUPERMEMORY_RERANK'] = savedRerank;
   } else {
     delete process.env['SUPERMEMORY_RERANK'];
+  }
+  if (savedZbragUrl !== undefined) {
+    process.env['ZBRAG_URL'] = savedZbragUrl;
+  } else {
+    delete process.env['ZBRAG_URL'];
   }
 });
 
@@ -358,4 +366,187 @@ test('first attempt hangs until aborted then fast 200 -> success', async () => {
   expect(callCount).toBe(2);
   expect(result.results).toHaveLength(1);
   expect(result.results[0]?.path).toBe('wiki/a.md');
+  expect(result.source).toBe('supermemory');
+});
+
+// ============================================================================
+// Local zbrag index tests
+// ============================================================================
+
+function makeZbragHit(path: string, score = 0.5, slug?: string) {
+  return { slug: slug ?? path.split('/').pop()?.replace('.md', '') ?? '', path, src: 'wiki', score };
+}
+
+function makeZbragFetch(hits: unknown[], status = 200) {
+  return async (_url: string, _init?: RequestInit): Promise<FakeResponse> => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => ({ results: hits, timing: {}, source: 'local', index: '2026-10-01T00:00:00Z' }),
+  });
+}
+
+test('local success: returns source=local, fallback=false, no localError', async () => {
+  const fetchImpl = makeZbragFetch([makeZbragHit('wiki/a.md', 0.9)]);
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+  });
+
+  expect(result.source).toBe('local');
+  expect(result.fallback).toBe(false);
+  expect(result.localError).toBeUndefined();
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]?.path).toBe('wiki/a.md');
+});
+
+test('local failure -> Supermemory fallback with localError', async () => {
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    if (url.includes('127.0.0.1')) {
+      return { ok: false, status: 503, json: async () => ({}) };
+    }
+    return { ok: true, status: 200, json: async () => ({ results: [makeHit('wiki/b.md')], total: 1 }) };
+  };
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+    apiKey: 'test-key',
+  });
+
+  expect(result.source).toBe('supermemory');
+  expect(typeof result.localError).toBe('string');
+  expect(result.localError).toMatch(/HTTP 503/);
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]?.path).toBe('wiki/b.md');
+});
+
+test('no ZBRAG_URL: uses Supermemory, source=supermemory, no localError', async () => {
+  const fetchImpl = makeFetch([makeHit('wiki/c.md', 0.7)]);
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    apiKey: 'test-key',
+  });
+
+  expect(result.source).toBe('supermemory');
+  expect(result.localError).toBeUndefined();
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]?.path).toBe('wiki/c.md');
+});
+
+test('local success with no Supermemory key: succeeds without key lookup', async () => {
+  const fetchImpl = makeZbragFetch([makeZbragHit('wiki/d.md', 0.8)]);
+
+  const result = await semanticSearch('query', 5, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+  });
+
+  expect(result.source).toBe('local');
+  expect(result.results).toHaveLength(1);
+});
+
+// ============================================================================
+// semanticSearchPrivate tests
+// ============================================================================
+
+function makePrivateFetch(hits: unknown[], status = 200, capturedUrls?: string[]) {
+  return async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    capturedUrls?.push(url);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => ({ results: hits, timing: {}, source: 'local', index: '2026-10-01T00:00:00Z' }),
+    };
+  };
+}
+
+test('private without ZBRAG_URL throws', async () => {
+  delete process.env['ZBRAG_URL'];
+  await expect(semanticSearchPrivate('query')).rejects.toThrow(
+    'private search unavailable: no local index on this host',
+  );
+});
+
+test('private sends private=only&snippets=1', async () => {
+  const capturedUrls: string[] = [];
+  const hit = { ...makeZbragHit('wiki/work/meeting.md', 0.7), snippet: 'redacted text', redacted: 1 };
+  const fetchImpl = makePrivateFetch([hit], 200, capturedUrls);
+
+  const result = await semanticSearchPrivate('query', 3, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+  });
+
+  expect(capturedUrls).toHaveLength(1);
+  const url = new URL(capturedUrls[0]!);
+  expect(url.searchParams.get('private')).toBe('only');
+  expect(url.searchParams.get('snippets')).toBe('1');
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]?.snippet).toBe('redacted text');
+  expect(result.results[0]?.redacted).toBe(1);
+  expect(result.index).toBe('2026-10-01T00:00:00Z');
+});
+
+test('private clamps limit to 10', async () => {
+  const capturedUrls: string[] = [];
+  const fetchImpl = makePrivateFetch([], 200, capturedUrls);
+
+  await semanticSearchPrivate('query', 99, {
+    fetchImpl: fetchImpl as unknown as typeof fetch,
+    zbragUrl: 'http://127.0.0.1:9123',
+  });
+
+  const url = new URL(capturedUrls[0]!);
+  expect(Number(url.searchParams.get('k'))).toBe(10);
+});
+
+test('private never calls api.supermemory.ai even when zbrag fails', async () => {
+  const calledUrls: string[] = [];
+  const fetchImpl = async (url: string, _init?: RequestInit): Promise<FakeResponse> => {
+    calledUrls.push(url);
+    throw new Error('network error');
+  };
+
+  await expect(
+    semanticSearchPrivate('query', 5, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      zbragUrl: 'http://127.0.0.1:9123',
+    }),
+  ).rejects.toThrow();
+
+  expect(calledUrls.every((u) => !u.includes('supermemory.ai'))).toBe(true);
+});
+
+test('private reads ZBRAG_PRIVATE_TIMEOUT_MS, not ZBRAG_TIMEOUT_MS', async () => {
+  const prev = { priv: process.env['ZBRAG_PRIVATE_TIMEOUT_MS'], pub: process.env['ZBRAG_TIMEOUT_MS'] };
+  process.env['ZBRAG_PRIVATE_TIMEOUT_MS'] = '1';
+  process.env['ZBRAG_TIMEOUT_MS'] = '60000';
+
+  let aborted = false;
+  const fetchImpl = (_url: string, init?: RequestInit): Promise<FakeResponse> =>
+    new Promise((_resolve, reject) => {
+      (init?.signal as AbortSignal | undefined)?.addEventListener('abort', () => {
+        aborted = true;
+        reject(new DOMException('aborted', 'AbortError'));
+      });
+    });
+
+  const t0 = Date.now();
+  await expect(
+    semanticSearchPrivate('query', 5, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      zbragUrl: 'http://127.0.0.1:9123',
+    }),
+  ).rejects.toThrow();
+  const elapsed = Date.now() - t0;
+
+  if (prev.priv === undefined) delete process.env['ZBRAG_PRIVATE_TIMEOUT_MS'];
+  else process.env['ZBRAG_PRIVATE_TIMEOUT_MS'] = prev.priv;
+  if (prev.pub === undefined) delete process.env['ZBRAG_TIMEOUT_MS'];
+  else process.env['ZBRAG_TIMEOUT_MS'] = prev.pub;
+
+  expect(aborted).toBe(true);
+  expect(elapsed).toBeLessThan(500);
 });

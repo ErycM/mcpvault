@@ -227,6 +227,50 @@ test("wiki_link resolves path-qualified link to the exact file", async () => {
 });
 
 // ============================================================================
+// ZBRAG_URL / semantic_search_private tool visibility
+// ============================================================================
+
+test('semantic_search_private absent when ZBRAG_URL is not set', async () => {
+  const savedZbragUrl = process.env['ZBRAG_URL'];
+  delete process.env['ZBRAG_URL'];
+
+  try {
+    const server = createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    const names = result.tools.map((t) => t.name);
+    expect(names).not.toContain('semantic_search_private');
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedZbragUrl !== undefined) process.env['ZBRAG_URL'] = savedZbragUrl;
+    else delete process.env['ZBRAG_URL'];
+  }
+});
+
+test('semantic_search_private present when ZBRAG_URL is set', async () => {
+  const savedZbragUrl = process.env['ZBRAG_URL'];
+  process.env['ZBRAG_URL'] = 'http://127.0.0.1:9123';
+
+  try {
+    const server = createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    const names = result.tools.map((t) => t.name);
+    expect(names).toContain('semantic_search_private');
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedZbragUrl !== undefined) process.env['ZBRAG_URL'] = savedZbragUrl;
+    else delete process.env['ZBRAG_URL'];
+  }
+});
+
+// ============================================================================
 // SEARCH CACHE INVALIDATION
 // ============================================================================
 
