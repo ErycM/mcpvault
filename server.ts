@@ -83,7 +83,7 @@ const pathFilter = allowedExtensions
   ? new PathFilter({ allowedExtensions })
   : undefined;
 
-const server = createServer(vaultPath, {
+const server = await createServer(vaultPath, {
   version: VERSION,
   ...(pathFilter && { pathFilter }),
 });

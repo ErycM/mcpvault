@@ -10,6 +10,7 @@ import { SearchService } from "./search.js";
 import { handleWikiLinkTool } from "./wikilink/index.js";
 import { semanticSearch, semanticSearchPrivate } from "./semantic.js";
 import { resolve } from "path";
+import { readFile } from "node:fs/promises";
 
 export interface CreateServerOptions {
   name?: string;
@@ -18,7 +19,7 @@ export interface CreateServerOptions {
   frontmatterHandler?: FrontmatterHandler;
 }
 
-export function createServer(vaultPath: string, options: CreateServerOptions = {}): Server {
+export async function createServer(vaultPath: string, options: CreateServerOptions = {}): Promise<Server> {
   const {
     name = "mcpvault",
     version = "0.0.0",
@@ -27,6 +28,7 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
   } = options;
 
   const resolvedVaultPath = resolve(vaultPath);
+  const descriptionOverrides = await loadDescriptionOverrides();
   const fileSystem = new FileSystemService(resolvedVaultPath, pathFilter, frontmatterHandler);
   const searchService = new SearchService(resolvedVaultPath, pathFilter);
 
@@ -35,8 +37,7 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    return {
-      tools: [
+    const tools = [
         {
           name: "read_note",
           description: "Read a note from the Obsidian vault",
@@ -121,7 +122,7 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
         },
         {
           name: "semantic_search",
-          description: "Semantic search over the vault's wiki/ pages (Supermemory by default; local index as fallback when available — the response's `source` says which answered). Finds pages by meaning, Portuguese<->English. Returns paths and scores only: open the pages with read_note. Use together with search_notes, not instead of it. Sensitive values are not in the vault, and client-meeting detail lives only in the private vault: use semantic_search_private for it when that tool exists.",
+          description: "Semantic (meaning-based) search over the vault's indexed notes. Returns paths and scores only: open the notes with read_note. Use together with search_notes, not instead of it. The response's `source` says which index answered.",
           inputSchema: {
             type: "object",
             properties: {
@@ -133,7 +134,7 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
         },
         ...(process.env['ZBRAG_URL'] ? [{
           name: "semantic_search_private",
-          description: "Meaning-based search over the private vault's client-meeting bodies. Those bodies are not in the vault: wiki/work/ pages are stubs. Returns the stub path, a score and a redacted snippet of the private body. Use it when a question needs detail of a client meeting that the stub does not have. Snippets are confidential: quote them in the chat, never copy them into a vault page (write_note, patch_note, update_frontmatter) or any other tool. Sensitive values are redacted at the source, and every call is logged.",
+          description: "Semantic search over a private corpus that is kept outside the vault and indexed by a local service. Returns the vault path the hit maps to, a score and a redacted snippet. Snippets are confidential: quote them in the chat only, never copy them into a note or another tool. Every call is logged by the service.",
           inputSchema: {
             type: "object",
             properties: {
@@ -275,8 +276,14 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
             required: ["document"]
           }
         }
-      ]
-    };
+    ];
+    for (const tool of tools) {
+      const override = descriptionOverrides[tool.name];
+      if (typeof override === 'string') {
+        tool.description = override;
+      }
+    }
+    return { tools };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -513,6 +520,23 @@ export function createServer(vaultPath: string, options: CreateServerOptions = {
   });
 
   return server;
+}
+
+async function loadDescriptionOverrides(): Promise<Record<string, string>> {
+  const envPath = process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  if (!envPath) return {};
+  try {
+    const raw = await readFile(envPath, 'utf-8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      process.stderr.write(`[mcpvault] MCPVAULT_TOOL_DESCRIPTIONS: invalid JSON (expected object), using built-in descriptions\n`);
+      return {};
+    }
+    return parsed as Record<string, string>;
+  } catch {
+    process.stderr.write(`[mcpvault] MCPVAULT_TOOL_DESCRIPTIONS: could not load "${envPath}", using built-in descriptions\n`);
+    return {};
+  }
 }
 
 function trimPaths(args: any): any {

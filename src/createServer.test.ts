@@ -20,14 +20,14 @@ afterEach(async () => {
   }
 });
 
-test("createServer returns a Server instance", () => {
-  const server = createServer(testVaultPath, { version: "1.0.0" });
+test("createServer returns a Server instance", async () => {
+  const server = await createServer(testVaultPath, { version: "1.0.0" });
   expect(server).toBeDefined();
   expect(typeof server.connect).toBe("function");
 });
 
 test("server registers 17 tools", async () => {
-  const server = createServer(testVaultPath, { version: "1.0.0" });
+  const server = await createServer(testVaultPath, { version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
   const client = new Client({ name: "test-client", version: "1.0.0" });
@@ -66,7 +66,7 @@ test("server registers 17 tools", async () => {
 });
 
 test("server can read and write notes via tools", async () => {
-  const server = createServer(testVaultPath, { version: "1.0.0" });
+  const server = await createServer(testVaultPath, { version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
 
   const client = new Client({ name: "test-client", version: "1.0.0" });
@@ -88,8 +88,8 @@ test("server can read and write notes via tools", async () => {
   await server.close();
 });
 
-test("custom options are applied", () => {
-  const server = createServer(testVaultPath, {
+test("custom options are applied", async () => {
+  const server = await createServer(testVaultPath, {
     name: "custom-name",
     version: "2.0.0",
   });
@@ -97,7 +97,7 @@ test("custom options are applied", () => {
 });
 
 async function connectClient() {
-  const server = createServer(testVaultPath, { version: "1.0.0" });
+  const server = await createServer(testVaultPath, { version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "test-client", version: "1.0.0" });
   await Promise.all([
@@ -235,7 +235,7 @@ test('semantic_search_private absent when ZBRAG_URL is not set', async () => {
   delete process.env['ZBRAG_URL'];
 
   try {
-    const server = createServer(testVaultPath, { version: '1.0.0' });
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test-client', version: '1.0.0' });
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
@@ -255,7 +255,7 @@ test('semantic_search_private present when ZBRAG_URL is set', async () => {
   process.env['ZBRAG_URL'] = 'http://127.0.0.1:9123';
 
   try {
-    const server = createServer(testVaultPath, { version: '1.0.0' });
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: 'test-client', version: '1.0.0' });
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
@@ -349,5 +349,91 @@ test("move_note then search_notes returns the new path", async () => {
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// ============================================================================
+// MCPVAULT_TOOL_DESCRIPTIONS overrides
+// ============================================================================
+
+test('MCPVAULT_TOOL_DESCRIPTIONS: valid file overrides description', async () => {
+  const descPath = join(testVaultPath, 'descs.json');
+  await writeFile(descPath, JSON.stringify({ read_note: 'Custom read description.' }));
+  const savedEnv = process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = descPath;
+  try {
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    const tool = result.tools.find((t) => t.name === 'read_note');
+    expect(tool?.description).toBe('Custom read description.');
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedEnv !== undefined) process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = savedEnv;
+    else delete process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  }
+});
+
+test('MCPVAULT_TOOL_DESCRIPTIONS: missing file keeps built-in description', async () => {
+  const savedEnv = process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = '/tmp/nonexistent-descs-for-mcpvault-test.json';
+  try {
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    const tool = result.tools.find((t) => t.name === 'read_note');
+    expect(tool?.description).toBeTruthy();
+    expect(tool?.description).not.toBe('');
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedEnv !== undefined) process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = savedEnv;
+    else delete process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  }
+});
+
+test('MCPVAULT_TOOL_DESCRIPTIONS: invalid JSON keeps built-in description', async () => {
+  const descPath = join(testVaultPath, 'bad.json');
+  await writeFile(descPath, '{ not valid json');
+  const savedEnv = process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = descPath;
+  try {
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    const tool = result.tools.find((t) => t.name === 'read_note');
+    expect(tool?.description).toBeTruthy();
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedEnv !== undefined) process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = savedEnv;
+    else delete process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  }
+});
+
+test('MCPVAULT_TOOL_DESCRIPTIONS: unknown tool name is ignored', async () => {
+  const descPath = join(testVaultPath, 'unknown.json');
+  await writeFile(descPath, JSON.stringify({ nonexistent_tool: 'Should not crash.' }));
+  const savedEnv = process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
+  process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = descPath;
+  try {
+    const server = await createServer(testVaultPath, { version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test-client', version: '1.0.0' });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.listTools();
+    expect(result.tools.length).toBeGreaterThan(0);
+    await client.close();
+    await server.close();
+  } finally {
+    if (savedEnv !== undefined) process.env['MCPVAULT_TOOL_DESCRIPTIONS'] = savedEnv;
+    else delete process.env['MCPVAULT_TOOL_DESCRIPTIONS'];
   }
 });

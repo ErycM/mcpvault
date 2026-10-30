@@ -295,7 +295,10 @@ async function supermemorySearch(
 ): Promise<Omit<SemanticSearchResponse, 'source' | 'localError'>> {
   const apiKey = await resolveKey(opts);
   const container =
-    opts?.container ?? process.env['SUPERMEMORY_CONTAINER'] ?? 'vault-wiki';
+    opts?.container ?? process.env['SUPERMEMORY_CONTAINER'];
+  if (!container) {
+    throw new Error('SUPERMEMORY_CONTAINER is not set');
+  }
   const retryDelayMs = opts?.retryDelayMs ?? 500;
   const timeoutMs = opts?.timeoutMs ?? 8_000;
 

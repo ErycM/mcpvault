@@ -180,7 +180,10 @@ export async function semanticSearch(query, limit = 10, opts) {
 }
 async function supermemorySearch(query, clampedLimit, opts, fetchImpl) {
     const apiKey = await resolveKey(opts);
-    const container = opts?.container ?? process.env['SUPERMEMORY_CONTAINER'] ?? 'vault-wiki';
+    const container = opts?.container ?? process.env['SUPERMEMORY_CONTAINER'];
+    if (!container) {
+        throw new Error('SUPERMEMORY_CONTAINER is not set');
+    }
     const retryDelayMs = opts?.retryDelayMs ?? 500;
     const timeoutMs = opts?.timeoutMs ?? 8_000;
     const t0 = Date.now();

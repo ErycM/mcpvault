@@ -369,6 +369,19 @@ Most modern MCP clients use similar JSON configuration patterns. Refer to your s
 - **Content Analysis**: "Find all notes that mention 'API design' and create a comprehensive guide"
 - **Smart Tagging**: "Review my untagged notes and suggest appropriate tags based on content"
 
+## Environment Variables
+
+| Variable | Description |
+|---|---|
+| `SUPERMEMORY_API_KEY` | Supermemory API key for `semantic_search`. Alternatively read from `SUPERMEMORY_KEY_FILE` (default: `~/.config/supermemory/key`). |
+| `SUPERMEMORY_CONTAINER` | Supermemory container tag to search. **Required** when `semantic_search` routes to Supermemory; if unset the tool returns an error. |
+| `SUPERMEMORY_RERANK` | Set to `1` to enable server-side reranking in Supermemory (off by default; measured 3× latency increase). |
+| `ZBRAG_URL` | Base URL of a local semantic index service. When set, enables `semantic_search_private` and optionally routes `semantic_search` through the local index (see `ZBRAG_WIKI`). |
+| `ZBRAG_WIKI` | Controls `semantic_search` routing when `ZBRAG_URL` is set: `fallback` (default) — use Supermemory first, local index on error; `primary` — local index first, Supermemory on error; `off` — always use Supermemory. |
+| `ZBRAG_TIMEOUT_MS` | Per-attempt timeout in ms for local index calls in `semantic_search` (default: `4000`). |
+| `ZBRAG_PRIVATE_TIMEOUT_MS` | Per-attempt timeout in ms for `semantic_search_private` (default: `8000`). |
+| `MCPVAULT_TOOL_DESCRIPTIONS` | Path to a JSON file mapping tool name → description string. Entries override the built-in description of those tools. Invalid JSON or a missing file logs one warning to stderr and keeps the built-in text; the server never crashes. Read once at startup. |
+
 ## Troubleshooting
 
 ### Common Issues

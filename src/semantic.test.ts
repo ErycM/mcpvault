@@ -22,15 +22,18 @@ let savedApiKey: string | undefined;
 let savedKeyFile: string | undefined;
 let savedRerank: string | undefined;
 let savedZbragUrl: string | undefined;
+let savedContainer: string | undefined;
 
 beforeEach(() => {
   savedApiKey = process.env['SUPERMEMORY_API_KEY'];
   savedKeyFile = process.env['SUPERMEMORY_KEY_FILE'];
   savedRerank = process.env['SUPERMEMORY_RERANK'];
   savedZbragUrl = process.env['ZBRAG_URL'];
+  savedContainer = process.env['SUPERMEMORY_CONTAINER'];
   delete process.env['SUPERMEMORY_API_KEY'];
   delete process.env['SUPERMEMORY_RERANK'];
   delete process.env['ZBRAG_URL'];
+  delete process.env['SUPERMEMORY_CONTAINER'];
   process.env['SUPERMEMORY_KEY_FILE'] = '/tmp/nonexistent-sm-key-for-tests';
 });
 
@@ -55,6 +58,11 @@ afterEach(() => {
   } else {
     delete process.env['ZBRAG_URL'];
   }
+  if (savedContainer !== undefined) {
+    process.env['SUPERMEMORY_CONTAINER'] = savedContainer;
+  } else {
+    delete process.env['SUPERMEMORY_CONTAINER'];
+  }
 });
 
 test('deduplicates results by path and respects limit', async () => {
@@ -68,6 +76,7 @@ test('deduplicates results by path and respects limit', async () => {
   const result = await semanticSearch('test query', 2, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
   });
 
   expect(result.results).toHaveLength(2);
@@ -95,6 +104,7 @@ test('date fallback makes exactly two calls and sets fallback: true', async () =
   const result = await semanticSearch('notícias entre 2026-09-01 e 2026-09-30', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
   });
 
   expect(callCount).toBe(2);
@@ -118,6 +128,7 @@ test('no fallback when first call returns results even if query has date', async
   const result = await semanticSearch('notes from 2026-01-01', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
   });
 
   expect(callCount).toBe(1);
@@ -140,6 +151,22 @@ test('missing key throws error starting with "semantic search unavailable:" not 
   expect(caughtError?.message).not.toContain(FAKE_KEY);
 });
 
+test('missing SUPERMEMORY_CONTAINER throws clear error', async () => {
+  delete process.env['SUPERMEMORY_CONTAINER'];
+  const fetchImpl = makeFetch([makeHit('wiki/a.md')]);
+  let caughtError: Error | undefined;
+  try {
+    await semanticSearch('query', 5, {
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      apiKey: 'test-key',
+    });
+  } catch (err) {
+    caughtError = err as Error;
+  }
+  expect(caughtError).toBeDefined();
+  expect(caughtError?.message).toBe('SUPERMEMORY_CONTAINER is not set');
+});
+
 test('HTTP 500 throws error starting with "semantic search unavailable:" not containing the key', async () => {
   const FAKE_KEY = 'super-secret-api-key-value-must-not-leak';
 
@@ -154,6 +181,7 @@ test('HTTP 500 throws error starting with "semantic search unavailable:" not con
     await semanticSearch('test', 5, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       apiKey: FAKE_KEY,
+      container: 'test-container',
       retryDelayMs: 0,
     });
   } catch (err) {
@@ -176,6 +204,7 @@ test('body has no rerank field by default', async () => {
   await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
   });
 
@@ -195,6 +224,7 @@ test('body includes rerank: true when SUPERMEMORY_RERANK=1', async () => {
   await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
   });
 
@@ -212,6 +242,7 @@ test('body has raw search limit of 100', async () => {
   await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
   });
 
@@ -232,6 +263,7 @@ test('500 then 200 -> success with exactly 2 fetch calls', async () => {
   const result = await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
   });
 
@@ -253,6 +285,7 @@ test('402 -> throws with exactly 1 fetch call', async () => {
     await semanticSearch('test query', 5, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       apiKey: 'test-key',
+      container: 'test-container',
       retryDelayMs: 0,
     });
   } catch (err) {
@@ -278,6 +311,7 @@ test('AbortError then 200 -> success with exactly 2 fetch calls', async () => {
   const result = await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
   });
 
@@ -299,6 +333,7 @@ test('two 500s -> throws after exactly 2 fetch calls', async () => {
     await semanticSearch('test query', 5, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       apiKey: 'test-key',
+      container: 'test-container',
       retryDelayMs: 0,
     });
   } catch (err) {
@@ -326,6 +361,7 @@ test('both attempts hang until aborted -> rejects with timeout after exactly 2 a
     await semanticSearch('test query', 5, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       apiKey: 'test-key',
+      container: 'test-container',
       retryDelayMs: 0,
       timeoutMs: 50,
     });
@@ -359,6 +395,7 @@ test('first attempt hangs until aborted then fast 200 -> success', async () => {
   const result = await semanticSearch('test query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     retryDelayMs: 0,
     timeoutMs: 50,
   });
@@ -413,6 +450,7 @@ test('local failure -> Supermemory fallback with localError', async () => {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     zbragUrl: 'http://127.0.0.1:9123',
     apiKey: 'test-key',
+    container: 'test-container',
     zbragWiki: 'primary',
   });
 
@@ -429,6 +467,7 @@ test('no ZBRAG_URL: uses Supermemory, source=supermemory, no localError', async 
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
   });
 
   expect(result.source).toBe('supermemory');
@@ -474,6 +513,7 @@ test('zbragWiki=fallback: SM succeeds -> source=supermemory, no supermemoryError
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     zbragUrl: 'http://127.0.0.1:9123',
     zbragWiki: 'fallback',
   });
@@ -498,6 +538,7 @@ test('zbragWiki=fallback: SM error -> zbrag fallback with supermemoryError', asy
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     zbragUrl: 'http://127.0.0.1:9123',
     zbragWiki: 'fallback',
     retryDelayMs: 0,
@@ -522,6 +563,7 @@ test('zbragWiki=fallback: both fail -> rethrows SM error', async () => {
     await semanticSearch('query', 5, {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       apiKey: 'test-key',
+      container: 'test-container',
       zbragUrl: 'http://127.0.0.1:9123',
       zbragWiki: 'fallback',
       retryDelayMs: 0,
@@ -546,6 +588,7 @@ test('zbragWiki=fallback: SM returns zero results -> no zbrag fallback', async (
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     zbragUrl: 'http://127.0.0.1:9123',
     zbragWiki: 'fallback',
   });
@@ -568,6 +611,7 @@ test('zbragWiki=off: never calls zbrag even when zbragUrl set', async () => {
   const result = await semanticSearch('query', 5, {
     fetchImpl: fetchImpl as unknown as typeof fetch,
     apiKey: 'test-key',
+    container: 'test-container',
     zbragUrl: 'http://127.0.0.1:9123',
     zbragWiki: 'off',
   });
